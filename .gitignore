@@ -1,0 +1,15 @@
+# secrets — never commit
+config.json
+
+# 32-bit Python runtime (bundled, too big for git)
+python/
+get-pip.py
+*.zip
+
+# python runtime artifacts
+__pycache__/
+*.pyc
+
+# downloaded attachments
+attachments/*
+!attachments/.gitkeep

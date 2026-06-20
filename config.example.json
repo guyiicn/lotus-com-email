@@ -1,0 +1,7 @@
+{
+  "notes_id_password": "YOUR_ID_PASSWORD",
+  "notes_id_file": "C:\\Users\\YOUR_USERNAME\\AppData\\Local\\IBM\\Notes\\Data\\YOUR_NAME.id",
+  "mail_server": "CN=YOUR_MAIL_SERVER/O=YOUR_ORG",
+  "mail_file": "mail\\YOUR_NAME.nsf",
+  "names_nsf": "names.nsf"
+}

@@ -1,0 +1,16 @@
+{
+  "_comment": "Auto-push/newsletter filter rules. list_mail/search_mail with exclude_auto=true drop any mail whose From or Subject contains one of these (case-insensitive) substrings. Edit freely — no code change needed. Add entries as you discover new noise sources.",
+  "from_filters": [
+    "bitcoin news crawler",
+    "googlealerts-noreply@google.com",
+    "google alerts",
+    "noreply@feedburner",
+    "mailer-daemon",
+    "postmaster@"
+  ],
+  "subject_filters": [
+    "google alert -",
+    "daily analytics",
+    "每日信用管家"
+  ]
+}

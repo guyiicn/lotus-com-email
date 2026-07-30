@@ -223,13 +223,7 @@ class NotesClient:
                 body = str(rt.Text)
         except Exception:
             body = self._item(doc, "Body")
-        attachments = []
-        if doc.HasEmbedded:
-            for item in doc.Items:
-                # attachment items have type ATTACHMENT (value 1084)
-                if item.Type == 1084:
-                    name = item.Values[0] if item.Values else "unknown"
-                    attachments.append(str(name))
+        attachments = self._collect_attachment_names(doc)
         return {
             "universal_id": str(doc.UniversalID),
             "note_id": str(doc.NoteID),
@@ -241,6 +235,203 @@ class NotesClient:
             "posted_date": self._item(doc, "PostedDate"),
             "body": body,
             "attachments": attachments,
+        }
+
+    @staticmethod
+    def _iter_embedded_objects(rt_item):
+        """Yield attachment EmbeddedObjects from a RichText item, robust to
+        whether win32com hands us a COM collection (with .Count/.Item) or a
+        plain tuple/list. Used by _collect_attachment_names and
+        download_attachment. Only yields objects the caller can inspect."""
+        try:
+            embs = rt_item.EmbeddedObjects
+        except Exception:
+            return
+        if embs is None:
+            return
+        # COM collection style: has .Count and .Item(i) (1-based)
+        if hasattr(embs, "Count") and hasattr(embs, "Item"):
+            try:
+                count = int(embs.Count)
+            except Exception:
+                count = 0
+            for i in range(1, count + 1):
+                try:
+                    yield embs.Item(i)
+                except Exception:
+                    pass
+            return
+        # tuple / list style: 0-based
+        if isinstance(embs, (tuple, list)):
+            for obj in embs:
+                try:
+                    yield obj
+                except Exception:
+                    pass
+
+    def _collect_attachment_names(self, doc):
+        """Collect attachment filenames from a doc via two strategies:
+        (1) $File items (item.Type == 1084 = ATTACHMENT), and
+        (2) RichText 'Body' EmbeddedObjects (Type == 1454 = EMBED_ATTACHMENT).
+        Returns a de-duplicated list of filenames, preserving first-seen order.
+        Used by both get_mail (listing) and download_attachment (extraction)."""
+        names = []
+        seen = set()
+
+        # Strategy 1: $File items — most reliable for filenames
+        if doc.HasEmbedded:
+            for item in doc.Items:
+                try:
+                    if item.Type == 1084:
+                        vals = item.Values
+                        name = str(vals[0]) if vals and vals[0] else ""
+                        if name and name not in seen:
+                            seen.add(name)
+                            names.append(name)
+                except Exception:
+                    pass
+
+        # Strategy 2: Body RichText EmbeddedObjects — catches inline attachments
+        # that sometimes don't surface as $File items.
+        try:
+            rt = doc.GetFirstItem("Body")
+            if rt is not None:
+                for obj in self._iter_embedded_objects(rt):
+                    try:
+                        if obj.Type == self.EMBED_ATTACHMENT:  # 1454
+                            nm = str(obj.Source) or str(obj.Name)
+                            if nm and nm not in seen:
+                                seen.add(nm)
+                                names.append(nm)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return names
+
+    def download_attachment(self, universal_id, out_dir, attachment="*", overwrite=False):
+        """Download one or all attachments from a mail to out_dir.
+
+        Args:
+            universal_id: doc UNID (or NoteID) to read attachments from.
+            out_dir: target directory; created if missing.
+            attachment: which attachment to pull.
+                "*" (default)  -> all attachments;
+                a filename      -> that exact filename;
+                a substring     -> any attachment whose name contains it;
+                an int / digit-string -> 1-based index into the attachment list.
+            overwrite: if False (default), collisions are auto-renamed
+                (e.g. "f.pdf" -> "f (1).pdf") so re-downloads never clobber.
+
+        Returns dict:
+            out_dir, requested, downloaded: [{name, path, size, renamed_from?}],
+            skipped: [{name, reason}], errors: [{name, error}]
+        """
+        doc = self._get_doc_by_id(universal_id)
+        if doc is None:
+            raise RuntimeError(f"No document with id {universal_id}")
+
+        all_names = self._collect_attachment_names(doc)
+
+        # Resolve which attachments to pull based on the `attachment` selector.
+        sel = str(attachment).strip()
+        if sel in ("", "*", "all", "ALL"):
+            targets = list(all_names)
+        elif sel.lstrip("-").isdigit():
+            idx = int(sel)
+            if idx < 1 or idx > len(all_names):
+                raise RuntimeError(
+                    f"attachment index {idx} out of range (1..{len(all_names)})"
+                )
+            targets = [all_names[idx - 1]]
+        else:
+            # exact match first, then substring fallback
+            targets = [n for n in all_names if n == sel]
+            if not targets:
+                targets = [n for n in all_names if sel.lower() in n.lower()]
+            if not targets:
+                raise RuntimeError(
+                    f"No attachment matching '{sel}'. Available: {all_names}"
+                )
+
+        # Prepare output directory.
+        out_dir = os.path.abspath(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _safe_path(name):
+            """Return an output path that doesn't clobber an existing file
+            (unless overwrite=True). Mirrors Windows "(n)" suffix style."""
+            base = os.path.join(out_dir, name)
+            if overwrite or not os.path.exists(base):
+                return base, None
+            stem, ext = os.path.splitext(name)
+            n = 1
+            while True:
+                cand = os.path.join(out_dir, f"{stem} ({n}){ext}")
+                if not os.path.exists(cand):
+                    return cand, name
+                n += 1
+
+        downloaded = []
+        skipped = []
+        errors = []
+
+        for name in targets:
+            out_path, renamed_from = _safe_path(name)
+            extracted = False
+
+            # Path A: RichText EmbeddedObject direct extraction (preferred —
+            # handles inline attachments and preserves the original stream).
+            try:
+                rt = doc.GetFirstItem("Body")
+                if rt is not None:
+                    for obj in self._iter_embedded_objects(rt):
+                        try:
+                            if obj.Type == self.EMBED_ATTACHMENT:
+                                src = str(obj.Source) or str(obj.Name)
+                                if src == name:
+                                    obj.ExtractFile(out_path)
+                                    extracted = True
+                                    break
+                        except Exception:
+                            pass
+            except Exception as e:
+                errors.append({"name": name, "error": f"EmbeddedObject: {e}"})
+
+            # Path B: doc.GetAttachment(name).ExtractFile — catches attachments
+            # stored outside the Body RichText (e.g. $File-only items).
+            if not extracted:
+                try:
+                    att = doc.GetAttachment(name)
+                    if att is not None:
+                        att.ExtractFile(out_path)
+                        extracted = True
+                except Exception as e:
+                    errors.append({"name": name, "error": f"GetAttachment: {e}"})
+
+            if extracted:
+                try:
+                    size = os.path.getsize(out_path)
+                except Exception:
+                    size = None
+                entry = {"name": os.path.basename(out_path), "path": out_path, "size": size}
+                if renamed_from:
+                    entry["renamed_from"] = renamed_from
+                downloaded.append(entry)
+            else:
+                # Only keep the "not extracted" skip if no real error was logged
+                if not any(e["name"] == name for e in errors):
+                    skipped.append({"name": name, "reason": "extraction returned no file"})
+
+        return {
+            "universal_id": str(doc.UniversalID),
+            "out_dir": out_dir,
+            "available": all_names,
+            "requested": targets,
+            "downloaded": downloaded,
+            "skipped": skipped,
+            "errors": errors,
         }
 
     @staticmethod
@@ -325,15 +516,7 @@ class NotesClient:
                 except Exception:
                     body = self._item(d, "Body")
                 row["body"] = body[:body_limit]
-                atts = []
-                if d.HasEmbedded:
-                    for it in d.Items:
-                        try:
-                            if it.Type == 1084:
-                                atts.append(str(it.Values[0]) if it.Values else "?")
-                        except Exception:
-                            pass
-                row["attachments"] = atts
+                row["attachments"] = self._collect_attachment_names(d)
             out.append(row)
         return out
 
@@ -407,6 +590,7 @@ class NotesClient:
             raise RuntimeError(f"No document with id {universal_id}")
         orig_from = self._item(orig, "From")
         orig_cc = orig.GetItemValue("CopyTo") if reply_all else []
+        db = self._ensure_mail_db()
         doc = db.CreateDocument()
         doc.ReplaceItemValue("Form", "Memo")
         doc.ReplaceItemValue("SendTo", [orig_from])

@@ -13,3 +13,7 @@ __pycache__/
 # downloaded attachments
 attachments/*
 !attachments/.gitkeep
+
+# runtime logs
+*.log
+

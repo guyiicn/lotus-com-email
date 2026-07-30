@@ -67,6 +67,20 @@ TOOLS = [
         },
     },
     {
+        "name": "notes_download_attachment",
+        "description": "Download attachments from a mail to a local directory by its universal_id. Use after notes_get_mail / notes_search_mail to pull the actual file(s). Default downloads ALL attachments; pass a specific filename, substring, or 1-based index to select one. By default collisions are auto-renamed (e.g. 'f.pdf' -> 'f (1).pdf') so re-runs never clobber — set overwrite=true to replace.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "universal_id": {"type": "string", "description": "The UniversalID (or NoteID) of the mail, from notes_list_mail / notes_get_mail."},
+                "out_dir": {"type": "string", "description": "Target directory for the downloaded file(s); created if missing."},
+                "attachment": {"type": "string", "default": "*", "description": "Which attachment(s) to pull. '*' (default) = all; a filename = exact match; a substring = any name containing it; a number string like '1' = 1-based index into the attachment list."},
+                "overwrite": {"type": "boolean", "default": False, "description": "If false (default), name collisions are auto-renamed to '(1)','(2)',... ; if true, existing files are overwritten."},
+            },
+            "required": ["universal_id", "out_dir"],
+        },
+    },
+    {
         "name": "notes_send_mail",
         "description": "Send a new email. Recipients can be a single address, or comma/semicolon-separated, or a list. Use notes_find_contact first if you only know a name. Supports file attachments.",
         "inputSchema": {
@@ -157,6 +171,14 @@ def call_tool(name, args):
             body_limit=args.get("body_limit", 4000),
             newest_first=args.get("newest_first", True),
             exclude_auto=args.get("exclude_auto", False),
+        )
+        return _ok_text(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    if name == "notes_download_attachment":
+        data = c.download_attachment(
+            universal_id=args["universal_id"],
+            out_dir=args["out_dir"],
+            attachment=args.get("attachment", "*"),
+            overwrite=args.get("overwrite", False),
         )
         return _ok_text(json.dumps(data, ensure_ascii=False, indent=2, default=str))
     if name == "notes_send_mail":
